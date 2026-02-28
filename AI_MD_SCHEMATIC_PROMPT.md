@@ -1,9 +1,25 @@
 # AI MD Schematic Prompt
 
-Use this file when you need another AI model to draft a Markdown schematic that `eagle_schematic_generator.py` can parse without errors. Copy the block below, paste it into your AI chat, replace `<PROJECT_SPEC>` with your design notes, and ask the AI to produce the final `.md` document exactly once.
+Use this file when you need another AI model to draft a Markdown schematic that `eagle_schematic_generator.py` can parse without errors.
 
+**To copy on GitHub**: Click the copy button in the top-right of the code block below.
 
-```text
+**To copy from the command line** (after cloning the repo):
+
+```bash
+# Windows (PowerShell)
+Get-Content AI_MD_SCHEMATIC_PROMPT.md | Set-Clipboard
+
+# macOS
+cat AI_MD_SCHEMATIC_PROMPT.md | pbcopy
+
+# Linux (requires xclip)
+cat AI_MD_SCHEMATIC_PROMPT.md | xclip -selection clipboard
+```
+
+Copy the block below, paste it into your AI chat, replace `<PROJECT_SPEC>` with your design notes, and ask the AI to produce the final `.md` document exactly once.
+
+````text
 You are creating a Markdown schematic specification that will be parsed by the script `eagle_schematic_generator.py`. Use the design details I provide in <PROJECT_SPEC>, but ALWAYS obey the formatting and pin rules below so the script can build the Eagle schematic file without manual fixes.
 
 Assume nothing—read or recall the real component datasheets for EVERY IC and active device. You need the datasheet for two critical things: (1) the correct physical pin numbers and their functional names, and (2) the exact package type (DIP, SOIC, QFN, TQFP, etc.) for the specific part number. Different suffixes on the same IC family indicate different packages — for example, 74HC14**N** = DIP-14 but 74HC14**D** = SOIC-14, and LM7805**CT** = TO-220 but LM7805**MP** = SOT-223. Always check what the part number suffix means and put the correct package in the BOM.
@@ -119,4 +135,4 @@ This instruction set must work with any AI model and any electronics design. Exp
    - Use only ASCII text except for the `─` character that the parser requires.
 
 <PROJECT_SPEC>
-```
+````
