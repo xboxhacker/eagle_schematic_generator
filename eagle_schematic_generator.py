@@ -4,7 +4,7 @@ Eagle CAD Schematic Generator from AI MD Files
 Converts markdown schematic files to Eagle CAD .SCR scripts and .SCH files
 """
 
-__version__ = "1.4.6"
+__version__ = "1.4.10"
 
 import os
 import re
@@ -1624,6 +1624,7 @@ class MDSchematicParser:
             self._parse_nets(content)
             self._parse_connections(content)
             self.warnings = self._validate_cross_references()
+            self._validate_supply_net_isolation()
 
             self.data = {
                 'components': self.components,
@@ -1713,6 +1714,31 @@ class MDSchematicParser:
                         )
 
         return warnings
+
+    def _validate_supply_net_isolation(self) -> None:
+        """Ensure no pin appears on multiple supply nets (would short supplies)."""
+        pin_to_supply_nets: Dict[Tuple[str, str], Set[str]] = {}
+        for net_key, entry in self.net_nodes.items():
+            net_name = entry.get('name', net_key)
+            if not self._is_supply_net(net_name):
+                continue
+            for node in entry.get('nodes', []):
+                ref, pin = node.get('ref'), node.get('pin')
+                if not ref or not pin:
+                    continue
+                pin_to_supply_nets.setdefault((ref, pin), set()).add(net_name)
+
+        conflicts: List[str] = []
+        for (ref, pin), nets in pin_to_supply_nets.items():
+            if len(nets) > 1:
+                nets_sorted = sorted(nets)
+                conflicts.append(
+                    f"SUPPLY SHORT: {ref}.Pin{pin} appears on multiple supply nets: {', '.join(nets_sorted)}. "
+                    f"Fix the MD so each pin is on only one supply net."
+                )
+        if conflicts:
+            msg = "Supply net isolation violated:\n  " + "\n  ".join(conflicts)
+            raise Exception(msg)
 
     def _parse_components(self, content: str):
         """Parse component list/BOM from markdown."""
@@ -1976,6 +2002,23 @@ class MDSchematicParser:
             return True
         return False
 
+    def _validate_supply_net_isolation(self):
+        """Warn if any pin appears on more than one supply net (e.g. J8.Pin1 on both VCC5 and VCC12)."""
+        pin_to_nets: Dict[tuple, list] = {}  # (ref, pin) -> [net_name, ...]
+        for net_key, entry in self.net_nodes.items():
+            net_name = entry.get('name', net_key)
+            if not self._is_supply_net(net_name):
+                continue
+            for node in entry.get('nodes') or []:
+                key = (node['ref'], node['pin'])
+                pin_to_nets.setdefault(key, []).append(net_name)
+        for (ref, pin), nets in pin_to_nets.items():
+            if len(nets) > 1:
+                self.warnings.append(
+                    f"Supply net conflict: {ref}.Pin{pin} appears on multiple supply nets: {', '.join(nets)}. "
+                    "Fix the MD so each pin is on exactly one supply net."
+                )
+
     def _should_ignore_net(self, net_name: Optional[str]) -> bool:
         if not net_name:
             return False
@@ -2047,15 +2090,18 @@ class MDSchematicParser:
                     if pin_identifier and pin_label:
                         self._store_pin_label(current_component, pin_identifier, pin_label)
 
+                line_net = None
                 if current_component and pin_identifier:
                     net_refs = re.findall(r'(?:Net|Signal)\s+([A-Z_][A-Z0-9_]*)', line, re.IGNORECASE)
                     for net_name in net_refs:
                         self._register_net_node(net_name, current_component, pin_identifier, pin_label)
+                    if net_refs:
+                        line_net = net_refs[0]
 
                 if current_component and 'Pin' in line and ('to' in line or 'from' in line):
                     matches = re.findall(pattern1, line, re.IGNORECASE)
                     for pin1, label1, comp2, pin2, label2 in matches:
-                        self._add_connection(current_component, pin1, label1, comp2, pin2, label2)
+                        self._add_connection(current_component, pin1, label1, comp2, pin2, label2, net_name=line_net)
 
                 matches = re.findall(pattern2, line)
                 for comp1, pin1, label1, comp2, pin2, label2 in matches:
@@ -2063,15 +2109,18 @@ class MDSchematicParser:
                                          intermediate=True)
 
                 if current_component:
+                    if not line_net:
+                        line_nets = re.findall(r'(?:Net|Signal)\s+([A-Z_][A-Z0-9_]*)', line, re.IGNORECASE)
+                        line_net = line_nets[0] if line_nets else None
                     matches = re.findall(pattern3, line)
                     for pin1, label1, comp2, pin2, label2 in matches:
-                        self._add_connection(current_component, pin1, label1, comp2, pin2, label2)
-
-                if current_component:
+                        self._add_connection(current_component, pin1, label1, comp2, pin2, label2,
+                                             net_name=line_net)
                     matches = re.findall(pattern3b, line)
                     for pin1, paren_label, text_label, comp2, pin2, label2 in matches:
                         from_label = paren_label or text_label.strip()
-                        self._add_connection(current_component, pin1, from_label, comp2, pin2, label2)
+                        self._add_connection(current_component, pin1, from_label, comp2, pin2, label2,
+                                             net_name=line_net)
 
                 if current_component:
                     matches = re.findall(pattern_supply, line, re.IGNORECASE)
@@ -2094,11 +2143,14 @@ class MDSchematicParser:
                 # Catch-all: any CompRef.PinN on a line with current_component and pin_identifier
                 # Handles direct references like "Pin 1 (LED1): J7.Pin2" with no separator
                 if current_component and pin_identifier:
+                    line_nets = re.findall(r'(?:Net|Signal)\s+([A-Z_][A-Z0-9_]*)', line, re.IGNORECASE)
+                    catch_net = line_nets[0] if line_nets else None
                     all_refs = re.findall(r'([A-Z]+\d+)\.Pin\s*(\d+)(?:\s*\(([^)]+)\))?', line, re.IGNORECASE)
                     for comp2, pin2, label2 in all_refs:
                         if comp2.upper() != current_component.upper():
                             if not self._connection_exists(current_component, pin_identifier, comp2, pin2):
-                                self._add_connection(current_component, pin_identifier, pin_label, comp2, pin2, label2 or None)
+                                self._add_connection(current_component, pin_identifier, pin_label, comp2, pin2, label2 or None,
+                                                     net_name=catch_net)
 
             except re.error:
                 continue
@@ -2107,6 +2159,7 @@ class MDSchematicParser:
             self._parse_connections_aggressive(content)
 
         self._build_connections_from_net_nodes()
+        self._validate_supply_net_isolation()
         self._backfill_connection_labels()
         self._validate_parsed_connections(content)
 
@@ -2628,6 +2681,13 @@ class EagleSCRGenerator:
             result = self._resolve_connector_pin_scr(ref, pin_map, requested_pin)
             if result[0] is not None:
                 return result
+        # Passives (R, C, L): MD Pin 1/2 must map to distinct physical pins by position
+        if ref.startswith(('R', 'C', 'L')) and requested_pin and requested_pin.isdigit():
+            idx = int(requested_pin)
+            ordered = self._order_connector_pins(pin_map)
+            if 1 <= idx <= len(ordered):
+                key = ordered[idx - 1]
+                return key, pin_map[key]
         # Prioritize exact pin_label match (e.g. 1Y, 2Y, VCC)
         if pin_label:
             label_clean = pin_label.strip()
@@ -2726,7 +2786,7 @@ class EagleSCRGenerator:
         return None, None
 
     def _order_connector_pins(self, pin_map: Dict) -> List[str]:
-        """Return connector pin keys sorted by physical position (1, 2, 3...)."""
+        """Return pin keys sorted by physical position (1, 2, 3...). Used for connectors and passives."""
         def sort_key(item):
             k, v = item
             pad = str(v.get('pad') or '').strip().split()[0] if v.get('pad') else ''
@@ -2738,6 +2798,9 @@ class EagleSCRGenerator:
                 return (0, int(k))
             if k.startswith('-') and len(k) > 1 and k[1:].isdigit():
                 return (0, int(k[1:]))
+            m = re.search(r'(\d+)\s*$', str(k))
+            if m:
+                return (0, int(m.group(1)))
             return (1, k)
         return [k for k, _ in sorted(pin_map.items(), key=sort_key)]
 
@@ -3224,6 +3287,104 @@ class EagleSchematicWriter:
                 return False, None
         return True, supply_name
 
+    def _write_sch_connection_debug(self, output_file: str) -> Optional[str]:
+        """Write a debug file listing all SCH connections and verify against MD.
+        Returns the debug file path if written, else None."""
+        try:
+            base = str(output_file).rsplit('.', 1)[0] if '.' in str(output_file) else str(output_file)
+            debug_path = f"{base}_sch_connections_debug.txt"
+            lines: List[str] = []
+            lines.append("=== SCH Connection Debug ===")
+            lines.append("")
+
+            # 1. Build net → [(ref, pin), ...] from connected_pin_links
+            net_to_pins: Dict[str, List[Tuple[str, str]]] = {}
+            for key, info in self.connected_pin_links.items():
+                net = (info.get('net_name') or '').strip()
+                ref = (info.get('ref') or '').strip()
+                pin = (info.get('requested_pin') or info.get('resolved_pin') or '').strip()
+                if not net:
+                    net = "(no net)"
+                if ref and pin:
+                    net_to_pins.setdefault(net, []).append((ref, pin))
+
+            # Deduplicate per net (same ref.pin can appear from multiple connections)
+            for net in net_to_pins:
+                net_to_pins[net] = list(dict.fromkeys(net_to_pins[net]))
+
+            lines.append("--- Nets in SCH (net name → pins) ---")
+            for net in sorted(net_to_pins.keys(), key=lambda n: (0 if n.startswith('N$') else 1, n)):
+                pins = sorted(net_to_pins[net], key=lambda p: (p[0], p[1]))
+                pin_str = ', '.join(f"{r}.Pin{p}" for r, p in pins)
+                lines.append(f"  {net}: {pin_str}")
+            lines.append("")
+
+            # 2. MD connections for reference
+            connections = self.data.get('connections') or []
+            lines.append("--- MD File Connections (expected) ---")
+            for idx, conn in enumerate(connections):
+                if not isinstance(conn, dict):
+                    continue
+                fr = conn.get('from') or {}
+                to = conn.get('to') or {}
+                f_ref = (fr.get('ref') or '').strip()
+                f_pin = (fr.get('pin') or '').strip()
+                t_ref = (to.get('ref') or '').strip()
+                t_pin = (to.get('pin') or '').strip()
+                if self._is_supply_ref(f_ref) or self._is_supply_ref(t_ref):
+                    continue
+                if f_ref and f_pin and t_ref and t_pin:
+                    lines.append(f"  [{idx}] {f_ref}.Pin{f_pin} → {t_ref}.Pin{t_pin}")
+            lines.append("")
+
+            # 3. Verify: for each MD connection, from and to should be on same net
+            lines.append("--- Verification (MD vs SCH) ---")
+            mismatches: List[str] = []
+            for idx, conn in enumerate(connections):
+                if not isinstance(conn, dict):
+                    continue
+                fr = conn.get('from') or {}
+                to = conn.get('to') or {}
+                f_ref = (fr.get('ref') or '').strip()
+                f_pin = (fr.get('pin') or '').strip()
+                t_ref = (to.get('ref') or '').strip()
+                t_pin = (to.get('pin') or '').strip()
+                if self._is_supply_ref(f_ref) or self._is_supply_ref(t_ref):
+                    continue
+                if not (f_ref and f_pin and t_ref and t_pin):
+                    continue
+
+                from_key = (idx, 'from')
+                to_key = (idx, 'to')
+                from_info = self.connected_pin_links.get(from_key, {})
+                to_info = self.connected_pin_links.get(to_key, {})
+
+                from_net = (from_info.get('net_name') or '').strip()
+                to_net = (to_info.get('net_name') or '').strip()
+
+                if not from_net and not to_net:
+                    continue  # both missing - already in missing report
+                if from_net != to_net:
+                    mismatches.append(
+                        f"  MISMATCH: {f_ref}.Pin{f_pin} → {t_ref}.Pin{t_pin}  "
+                        f"(from on net '{from_net or 'MISSING'}', to on net '{to_net or 'MISSING'}')"
+                    )
+
+            if mismatches:
+                lines.append("  ⚠ ERRORS (from and to on different nets):")
+                lines.extend(mismatches)
+                for m in mismatches:
+                    self.debug_messages.append(m.strip())
+            else:
+                lines.append("  ✓ All verified connections have from and to on same net.")
+
+            with open(debug_path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+            return debug_path
+        except Exception as e:
+            self.debug_messages.append(f"Could not write connection debug: {e}")
+            return None
+
     def _validate_connection_coverage(self):
         """Add pin errors for any MD connections that never produced pinrefs."""
         if not self.expected_pin_links:
@@ -3590,8 +3751,15 @@ class EagleSchematicWriter:
                         self.debug_messages.append(f"  MISSING: {ref}.Pin{pin} ({label}) → {hint}")
             self.debug_messages.append(f"=============================\n")
 
+            # Write SCH connection debug file and verify against MD
+            debug_path = self._write_sch_connection_debug(output_file)
+            if debug_path:
+                self.debug_messages.append(f"\nConnection debug written: {debug_path}")
+
             status_msg = f"Successfully generated SCH file!\n\n"
             status_msg += f"Output: {output_file}\n\n"
+            if debug_path:
+                status_msg += f"Connection debug: {debug_path}\n\n"
             status_msg += f"Matched components: {len(matched_components)}\n"
             if unmatched_components:
                 status_msg += f"\nUnmatched components ({len(unmatched_components)}):\n"
@@ -4992,6 +5160,16 @@ class EagleSchematicWriter:
             if result[0] is not None:
                 return result
 
+        # Passives (R, C, L): MD Pin 1/2 must map to distinct physical pins by position.
+        # Some Eagle libraries use "pas 1"/"pas 2" or "~" for both; pad-based ordering
+        # ensures we never short both ends to the same junction.
+        if ref.startswith(('R', 'C', 'L')) and requested_pin and requested_pin.isdigit():
+            idx = int(requested_pin)
+            ordered = self._order_connector_pins(pin_map)
+            if 1 <= idx <= len(ordered):
+                key = ordered[idx - 1]
+                return key, pin_map[key]
+
         # Prioritize exact pin_label match (e.g. 1Y, 2Y, VCC)
         if pin_label:
             label_clean = pin_label.strip()
@@ -5114,7 +5292,7 @@ class EagleSchematicWriter:
         return None, None
 
     def _order_connector_pins(self, pin_map: Dict) -> List[str]:
-        """Return connector pin keys sorted by physical position (1, 2, 3...)."""
+        """Return pin keys sorted by physical position (1, 2, 3...). Used for connectors and passives."""
         def sort_key(item):
             k, v = item
             pad = str(v.get('pad') or '').strip().split()[0] if v.get('pad') else ''
@@ -5126,6 +5304,9 @@ class EagleSchematicWriter:
                 return (0, int(k))
             if k.startswith('-') and len(k) > 1 and k[1:].isdigit():
                 return (0, int(k[1:]))
+            m = re.search(r'(\d+)\s*$', str(k))
+            if m:
+                return (0, int(m.group(1)))
             return (1, k)
         return [k for k, _ in sorted(pin_map.items(), key=sort_key)]
 

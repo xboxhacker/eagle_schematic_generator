@@ -175,7 +175,9 @@ The file `AI_MD_SCHEMATIC_PROMPT.md` contains instructions for prompting an AI m
 
 ## Version
 
-Current version: **1.4.6** (see `__version__` in the script).
+Current version: **1.4.10** (see `__version__` in the script).
+
+**v1.4.10**: Fix supply net assignment so VCC5/VCC12/GND get proper names instead of N$1; add supply net isolation validation (warns when a pin appears on multiple supply nets).
 
 ---
 
@@ -193,6 +195,6 @@ Contributions are welcome. Please ensure any changes preserve compatibility with
 
 ## Help the cause
 
-If you find this script useful, please contribute to my beer fund.
+If you find this script useful, please contribute to my beer fund. Venmo - @William-Hare-311
 
 ![Beer Me](images/Venmo.jpg)
