@@ -1,6 +1,6 @@
 # Eagle CAD Schematic Generator
 
-A Python tool that converts AI generated Markdown schematic specifications into Eagle CAD schematic files (`.sch`) and scripts (`.scr`). Output is compatible with **Fusion 360 Electronic Design** and standard Eagle CAD workflows.
+A Python tool that converts AI-generated Markdown schematic specifications into Eagle CAD schematic files (`.sch`) and scripts (`.scr`). Output is compatible with **Fusion 360 Electronic Design** and standard Eagle CAD workflows.
 
 > **Prerequisites**: Basic knowledge of Eagle CAD schematic editors is required. You should be familiar with schematic symbols, nets, and how Eagle organizes components in libraries. This script produces editable schematics; you will need to review, adjust placement, and run DRC/ERC as needed in Eagle or Fusion 360.
 
@@ -33,7 +33,7 @@ The generated schematic is a starting point for further editing, layout, and man
 
 1. Clone or download this repository.
 2. Ensure Python 3.7+ is installed and `tkinter` is available (usually included with Python on Windows/macOS; on Linux you may need `python3-tk`).
-3. Point the script at your **Eagle CAD library folder** (a directory containing `.lbr` files; e.g., the `lbr` folder from your Eagle or Fusion 360 install).
+3. Point the script at your **Eagle CAD library folder** (see Requirements for Fusion 360 path; standalone Eagle typically has an `lbr` folder in its install directory).
 
 No `pip install` is required for basic operation.
 
@@ -84,8 +84,7 @@ Click **"2. Parse MD File"** after selecting your Markdown file. The script will
 
 Fix any parsing warnings in the Markdown before proceeding.
 
-> Screenshot: Parse MD File button and MD file path  
-> *Placeholder: Screenshot of Parse MD dialog or log output*
+![Parse the MD file](images/parse.jpg)
 
 ---
 
@@ -97,8 +96,7 @@ Click **"Auto-Map Components"** to match each Markdown reference to an Eagle lib
 - Correct any mismatches (wrong package, wrong part family, etc.)
 - Save mappings for reuse
 
-> Screenshot: Edit Component Mappings dialog  
-> *Placeholder: Screenshot of the component mapping editor*
+![Device Mappings](images/mappings.jpg)
 
 ---
 
@@ -112,8 +110,7 @@ Click **"3. Generate SCH"** to produce the Eagle schematic. The script will:
 
 Open the `.sch` file in Eagle or Fusion 360 Electronic Design to refine placement, run ERC/DRC, and proceed to layout.
 
-> Screenshot: Generate SCH button and output paths  
-> *Placeholder: Screenshot of successful SCH generation*
+![Generate SCH](images/gen.jpg)
 
 ---
 
@@ -170,9 +167,8 @@ The file `AI_MD_SCHEMATIC_PROMPT.md` contains instructions for prompting an AI m
 | ------------------------------ | ----------------------------------------- |
 | `eagle_schematic_generator.py` | Main script (GUI and logic)               |
 | `AI_MD_SCHEMATIC_PROMPT.md`    | Prompt template for AI-generated Markdown |
-| `eagle_schematic_config.txt`   | Optional config (library paths, etc.)     |
 | `eagle_library_cache.json`     | Cached library index (auto-generated)     |
-| `SmartCoil_FlipFLop/coil.md`   | Example Markdown schematic                |
+
 
 
 ---
@@ -183,6 +179,20 @@ Current version: **1.4.6** (see `__version__` in the script).
 
 ---
 
+## License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+
+The MIT License is recommended for this script because it is simple, permissive, and widely used. It allows commercial and non-commercial use, modification, and distribution with minimal requirements (preserve the copyright notice and license text). This encourages adoption and integration with other tools (e.g., Eagle, Fusion 360 workflows) without legal friction.
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please ensure any changes preserve compatibility with Eagle CAD and Fusion 360 Electronic Design workflows.
+
+## Help the cause
+
+If you find this script useful, please contribute to my beer fund.
+
+![Beer Me](images/Venmo.jpg)
