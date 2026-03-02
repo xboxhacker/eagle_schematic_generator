@@ -4,7 +4,7 @@ Eagle CAD Schematic Generator from AI MD Files
 Converts markdown schematic files to Eagle CAD .SCR scripts and .SCH files
 """
 
-__version__ = "1.4.10"
+__version__ = "1.4.12"
 
 import os
 import re
@@ -796,8 +796,12 @@ class EagleLibraryParser:
                                 'attributes': attr_details
                             })
 
-                    # Get pin mappings
-                    connects = device.findall(".//connect")
+                    # Get pin mappings — use first technology only so pad numbers are consistent
+                    # (multi-tech devices like 74HC08 have DIP+SOIC; we want one pad set)
+                    first_tech = device.find('.//technology')
+                    connects = first_tech.findall('.//connect') if first_tech is not None else []
+                    if not connects:
+                        connects = device.findall(".//connect")
                     pin_map = {}
                     gate_map = {}  # Maps connect.gate to deviceset.gate.name
 
@@ -844,6 +848,7 @@ class EagleLibraryParser:
                                 pin_y = float(sym_pin.get('y', 0))
                                 direction = sym_pin.get('direction') or ''
                                 rotation = sym_pin.get('rot') or ''
+                                length_attr = (sym_pin.get('length') or 'long').lower()
 
                                 if has_dup_pin_names:
                                     # Match by gate name; store gate offset for
@@ -857,6 +862,8 @@ class EagleLibraryParser:
                                             pin_map[gate_name]['direction'] = direction
                                         if rotation:
                                             pin_map[gate_name]['rotation'] = rotation
+                                        if length_attr:
+                                            pin_map[gate_name]['length'] = length_attr
                                 elif pin_name in pin_map:
                                     pin_map[pin_name]['x'] = pin_x
                                     pin_map[pin_name]['y'] = pin_y
@@ -864,6 +871,8 @@ class EagleLibraryParser:
                                         pin_map[pin_name]['direction'] = direction
                                     if rotation:
                                         pin_map[pin_name]['rotation'] = rotation
+                                    if length_attr:
+                                        pin_map[pin_name]['length'] = length_attr
                                     pin_map[pin_name]['gate'] = gate_name
                     
                     entries = self.device_map.get(key, [])
@@ -911,8 +920,11 @@ class EagleLibraryParser:
                     package = device.get('package', '')
                     device_variant = device.get('name', '')
                     
-                    # Get connects (pin mappings)
-                    connects = device.findall(".//connect")
+                    # Get connects (pin mappings) — use first technology only for consistent pad numbers
+                    first_tech = device.find('.//technology')
+                    connects = first_tech.findall('.//connect') if first_tech is not None else []
+                    if not connects:
+                        connects = device.findall(".//connect")
                     pin_map = {}
                     for connect in connects:
                         gate = connect.get('gate', '')
@@ -939,7 +951,8 @@ class EagleLibraryParser:
                                 pin_y = float(sym_pin.get('y', 0))
                                 direction = sym_pin.get('direction') or ''
                                 rotation = sym_pin.get('rot') or ''
-                                
+                                length_attr = (sym_pin.get('length') or 'long').lower()
+
                                 # Store absolute pin position (gate offset + pin offset)
                                 if pin_name in pin_map:
                                     pin_map[pin_name]['x'] = gate_x + pin_x
@@ -948,6 +961,8 @@ class EagleLibraryParser:
                                         pin_map[pin_name]['direction'] = direction
                                     if rotation:
                                         pin_map[pin_name]['rotation'] = rotation
+                                    if length_attr:
+                                        pin_map[pin_name]['length'] = length_attr
                     
                     # Create unique key
                     full_name = f"{device_name}{device_variant}"
@@ -1610,6 +1625,7 @@ class MDSchematicParser:
         self.net_nodes = {}
         self.net_name_lookup = set()
         self.pin_label_map = {}
+        self.warnings = []  # Must exist before _parse_connections (which calls _validate_supply_net_isolation)
 
         try:
             try:
@@ -1623,8 +1639,7 @@ class MDSchematicParser:
             self._parse_components(content)
             self._parse_nets(content)
             self._parse_connections(content)
-            self.warnings = self._validate_cross_references()
-            self._validate_supply_net_isolation()
+            self.warnings = self._validate_cross_references() + self.warnings
 
             self.data = {
                 'components': self.components,
@@ -2676,6 +2691,20 @@ class EagleSCRGenerator:
                         'mapped_to': resolved
                     })
                     return resolved, pin_map[resolved]
+        # ICs: match by pad number first — Pin 1 = pad 1
+        if ref.startswith(('U', 'Q')) and requested_pin and requested_pin.isdigit():
+            req_norm = requested_pin.lstrip('0') or '0'
+            for key, value in pin_map.items():
+                pad = str(value.get('pad') or '').strip()
+                if not pad:
+                    continue
+                for pt in pad.split():
+                    if pt == requested_pin or (pt.isdigit() and (pt.lstrip('0') or '0') == req_norm):
+                        return key, value
+                    if pt == f"P${requested_pin}" or pt == f"P${req_norm}":
+                        return key, value
+                if pad == f"P${requested_pin}" or pad == f"P${req_norm}":
+                    return key, value
         # Connectors: direct number-to-number matching
         if ref.startswith('J'):
             result = self._resolve_connector_pin_scr(ref, pin_map, requested_pin)
@@ -2701,15 +2730,37 @@ class EagleSCRGenerator:
             for k in pin_map:
                 if k.replace('~', '').upper() == label_no_tilde:
                     return k, pin_map[k]
-        # ICs/transistors: match MD pin number to Eagle pad (physical pin) first
-        if ref.startswith(('U', 'Q')) and requested_pin and requested_pin.isdigit():
-            for key, value in pin_map.items():
-                pad = str(value.get('pad') or '').strip()
-                if not pad:
-                    continue
-                for pt in pad.split():
-                    if pt == requested_pin or (pt.isdigit() and (pt.lstrip('0') or '0') == (requested_pin.lstrip('0') or '0')):
-                        return key, value
+            for k, v in pin_map.items():
+                pn = (v.get('pin_name') or v.get('pin') or k)
+                if pn and pn.replace('~', '').upper() == label_no_tilde:
+                    return k, pin_map[k]
+            # 74HC123 etc: 2CLR = 2~RD, 1CLR = 1~RD (library may use ~RD; pad numbers can be wrong)
+            label_upper = label_clean.upper().replace('~', '')
+            if label_upper in ('2CLR', '2RD'):
+                for k in pin_map:
+                    if k.replace('~', '').upper() in ('2CLR', '2RD'):
+                        return k, pin_map[k]
+                for k, v in pin_map.items():
+                    pn = (v.get('pin_name') or v.get('pin') or k)
+                    if pn and pn.replace('~', '').upper() in ('2CLR', '2RD'):
+                        return k, pin_map[k]
+            if label_upper in ('1CLR', '1RD'):
+                for k in pin_map:
+                    if k.replace('~', '').upper() in ('1CLR', '1RD'):
+                        return k, pin_map[k]
+                for k, v in pin_map.items():
+                    pn = (v.get('pin_name') or v.get('pin') or k)
+                    if pn and pn.replace('~', '').upper() in ('1CLR', '1RD'):
+                        return k, pin_map[k]
+            # 74HC123 etc: 1A = 1~A, 2A = 2~A (library uses overbar notation)
+            if label_upper == '1A':
+                for k in pin_map:
+                    if k.replace('~', '').upper() == '1A':
+                        return k, pin_map[k]
+            if label_upper == '2A':
+                for k in pin_map:
+                    if k.replace('~', '').upper() == '2A':
+                        return k, pin_map[k]
         candidates = []
         if requested_pin:
             candidates.append(requested_pin)
@@ -2822,7 +2873,12 @@ class EagleSCRGenerator:
         return None
 
     def _record_pin_error(self, ref: str, pin: str, pin_label: Optional[str], pin_map: Dict):
-        available_pins = sorted(pin_map.keys()) if pin_map else []
+        available_pins = []
+        if pin_map:
+            for k in sorted(pin_map.keys()):
+                pin_info = pin_map[k] if isinstance(pin_map[k], dict) else {}
+                pad = str(pin_info.get('pad') or pin_info.get('pin_name') or '').strip()
+                available_pins.append(f"{k} (Pin {pad})" if pad else k)
         self.pin_errors.append({
             'ref': ref,
             'pin': (pin or '').strip(),
@@ -2951,10 +3007,21 @@ class EagleSchematicWriter:
             return True
         return False
 
+    def _format_available_pins(self, pin_map: Optional[Dict]) -> List[str]:
+        """Format pin list as 'name (Pin N)' when pad is available."""
+        if not pin_map:
+            return []
+        result = []
+        for k in sorted(pin_map.keys()):
+            pin_info = pin_map[k] if isinstance(pin_map[k], dict) else {}
+            pad = str(pin_info.get('pad') or pin_info.get('pin_name') or '').strip()
+            result.append(f"{k} (Pin {pad})" if pad else k)
+        return result
+
     def _build_pin_error(self, ref: str, pin: str, label: Optional[str], error_msg: str,
                          pin_map: Optional[Dict] = None) -> Dict:
         """Build an enriched pin error dict with available pins and library info."""
-        available_pins = sorted(pin_map.keys()) if pin_map else []
+        available_pins = self._format_available_pins(pin_map)
         placement = self.component_placements.get(ref, {})
         return {
             'ref': ref,
@@ -3241,7 +3308,9 @@ class EagleSchematicWriter:
     def _record_connected_pin(self, conn_index: int, side: str, ref: str,
                               requested_pin: Optional[str], resolved_pin: Optional[str],
                               label: Optional[str], net_name: Optional[str]):
-        """Mark that a specific MD connection endpoint produced a pinref."""
+        """Mark that a specific MD connection endpoint produced a pinref.
+        Also marks all other expected entries for the same (ref, pin) so the
+        'connection endpoint' count matches (same pin in multiple connections)."""
         key = (conn_index, side)
         info = self.expected_pin_links.get(key)
         if not info:
@@ -3254,13 +3323,26 @@ class EagleSchematicWriter:
             info['label'] = label.strip()
         if net_name:
             info['net_name'] = net_name
-        self.connected_pin_links[key] = {
+        record = {
             'ref': ref,
             'requested_pin': requested_pin,
             'resolved_pin': resolved_pin,
             'label': label,
             'net_name': net_name
         }
+        self.connected_pin_links[key] = record
+        # Mark all other expected keys for same (ref, pin) - avoids "58 not wired" false count
+        req_upper = (requested_pin or '').strip().upper()
+        res_upper = (resolved_pin or '').strip().upper()
+        for k, exp in self.expected_pin_links.items():
+            if k in self.connected_pin_links:
+                continue
+            if (exp.get('ref') or '').strip() != (ref or '').strip():
+                continue
+            ep_req = (exp.get('requested_pin') or '').strip().upper()
+            ep_res = (exp.get('resolved_pin') or '').strip().upper()
+            if (req_upper and ep_req == req_upper) or (res_upper and ep_res == res_upper) or (req_upper and ep_res == req_upper) or (res_upper and ep_req == res_upper):
+                self.connected_pin_links[k] = dict(record)
 
     def _mark_supply_connected_pin(self, ref: Optional[str], pin_name: Optional[str], net_name: Optional[str]):
         """Remember that a component pin is already tied to a named supply net."""
@@ -3390,6 +3472,16 @@ class EagleSchematicWriter:
         if not self.expected_pin_links:
             return
 
+        # Build set of (ref, pin) that were connected - a pin is OK if ANY connection recorded it
+        connected_ref_pins: Set[Tuple[str, str]] = set()
+        for info in self.connected_pin_links.values():
+            r = (info.get('ref') or '').strip()
+            p = (info.get('resolved_pin') or info.get('requested_pin') or info.get('label') or '').strip().upper()
+            if r and p:
+                connected_ref_pins.add((r, p))
+            if r and (info.get('requested_pin') or '').strip():
+                connected_ref_pins.add((r, (info.get('requested_pin') or '').strip().upper()))
+
         existing_keys = set()
         for err in self.pin_errors:
             if not isinstance(err, dict):
@@ -3403,6 +3495,11 @@ class EagleSchematicWriter:
             if key in self.connected_pin_links:
                 continue
             ref = expected.get('ref')
+            # Consider connected if this (ref, pin) was recorded in ANY connection
+            req_pin = (expected.get('requested_pin') or '').strip().upper()
+            res_pin = (expected.get('resolved_pin') or '').strip().upper()
+            if ref and ((ref, req_pin) in connected_ref_pins or (ref, res_pin) in connected_ref_pins):
+                continue
             if not ref:
                 continue
             requested_pin = expected.get('requested_pin') or ''
@@ -3420,7 +3517,7 @@ class EagleSchematicWriter:
                 'pin': requested_pin,
                 'label': label,
                 'value': self._get_component_value(ref),
-                'available': sorted(pin_map.keys()) if pin_map else [],
+                'available': self._format_available_pins(pin_map),
                 'library': placement.get('library'),
                 'deviceset': placement.get('deviceset'),
                 'device': placement.get('device'),
@@ -3464,7 +3561,7 @@ class EagleSchematicWriter:
                     'library': placement.get('library'),
                     'deviceset': placement.get('deviceset'),
                     'device': placement.get('device'),
-                    'available': sorted(pin_map.keys()),
+                    'available': self._format_available_pins(pin_map),
                     'error': ("Power pin {0} has no connection in the Markdown file. "
                               "Add an explicit net or document it as NC.").format(pin_name)
                 })
@@ -3526,6 +3623,24 @@ class EagleSchematicWriter:
             if key and key in overrides:
                 return True
         return False
+
+    def _pin_length_mm(self, length_attr: str) -> float:
+        """Eagle pin length: short=0.1\", middle=0.2\", long=0.3\" -> mm."""
+        length_map = {'point': 0.0, 'short': 2.54, 'middle': 5.08, 'long': 7.62}
+        return length_map.get((length_attr or 'long').lower(), 7.62)
+
+    def _get_pin_connection_point(self, pin_x: float, pin_y: float, pin_info: Dict) -> Tuple[float, float]:
+        """Eagle connection point is at the pin tip. R0=right, R90=above, R180=left, R270=below."""
+        length_attr = pin_info.get('length', 'long')
+        length_mm = self._pin_length_mm(length_attr)
+        rotation = str(pin_info.get('rotation', '')).upper()
+        if 'R180' in rotation:
+            return (pin_x - length_mm, pin_y)
+        if 'R90' in rotation:
+            return (pin_x, pin_y + length_mm)
+        if 'R270' in rotation:
+            return (pin_x, pin_y - length_mm)
+        return (pin_x + length_mm, pin_y)
 
     def _snap_to_grid(self, value: float) -> float:
         """Snap a coordinate to the configured grid spacing."""
@@ -4652,7 +4767,8 @@ class EagleSchematicWriter:
                 parent[root_b] = root_a
 
         def ensure_node(key: Tuple[str, str], ref: str, pin_name: str,
-                        pin_info: Dict, pin_x: float, pin_y: float):
+                        pin_info: Dict, pin_x: float, pin_y: float,
+                        pin_x_raw: Optional[float] = None, pin_y_raw: Optional[float] = None):
             if key in node_data:
                 return
             node_data[key] = {
@@ -4661,7 +4777,27 @@ class EagleSchematicWriter:
                 'pin_info': pin_info,
                 'pin_x': pin_x,
                 'pin_y': pin_y,
+                # Exact pin position for wire - Eagle requires wire to touch pin precisely
+                'pin_x_raw': pin_x_raw if pin_x_raw is not None else pin_x,
+                'pin_y_raw': pin_y_raw if pin_y_raw is not None else pin_y,
             }
+
+        # PRE-PASS: Build set of pins that are in signal (non-supply) nets.
+        # These must NOT be added to supply nets - otherwise we get duplicate pins
+        # (e.g. U5.1Q in both VCC5 and ADJ_Q when Pin 13 wrongly resolves to 1Q).
+        signal_pins: Set[Tuple[str, str]] = set()
+        for conn in connections:
+            from_ref = conn['from'].get('ref')
+            to_ref = conn['to'].get('ref')
+            if self._is_supply_ref(from_ref) or self._is_supply_ref(to_ref):
+                continue
+            for entry, ref in [(conn['from'], from_ref), (conn['to'], to_ref)]:
+                if ref not in self.component_placements:
+                    continue
+                pins = self.component_placements[ref].get('pins', {})
+                resolved, _ = self._resolve_pin(ref, pins, entry.get('pin'), entry.get('label'))
+                if resolved:
+                    signal_pins.add((ref, resolved))
 
         # PHASE 1: Collect all supply connection pins by net
         supply_pin_groups: Dict[str, List[Dict]] = {}
@@ -4773,52 +4909,40 @@ class EagleSchematicWriter:
                         comp_pins))
                     continue
 
+                # Skip if this pin is already in a signal net (avoids duplicate: e.g. 1Q in both VCC5 and ADJ_Q)
+                if (comp_ref, comp_pin_resolved) in signal_pins:
+                    self.debug_messages.append(
+                        f"  Supply skip: {comp_ref}.{comp_pin_resolved} already in signal net (not adding to {net_name_attr})")
+                    continue
+
                 comp_gate = comp_pin_info.get('gate', 'G$1')
                 has_coords = 'x' in comp_pin_info and 'y' in comp_pin_info
 
+                segment = ET.SubElement(net, 'segment')
+                actual_pin = comp_pin_info.get('pin_name', comp_pin_resolved)
+                ET.SubElement(segment, 'pinref', part=comp_ref, gate=comp_gate, pin=actual_pin)
+
+                # Small wire stub - use snapped grid coordinates for pin connection
                 if has_coords:
-                    comp_pin_x = self._snap_to_grid(comp_placement['x'] + comp_pin_info.get('gate_x', 0) + comp_pin_info['x'])
-                    comp_pin_y = self._snap_to_grid(comp_placement['y'] + comp_pin_info.get('gate_y', 0) + comp_pin_info['y'])
-
-                    segment = ET.SubElement(net, 'segment')
-                    actual_pin = comp_pin_info.get('pin_name', comp_pin_resolved)
-                    ET.SubElement(segment, 'pinref', part=comp_ref, gate=comp_gate, pin=actual_pin)
-
-                    stub_length = self.grid_step * 1.0
-                    pin_rotation = str(comp_pin_info.get('rotation', '')) if isinstance(comp_pin_info, dict) else ''
-
-                    if 'R180' in pin_rotation:
-                        stub_end_x = comp_pin_x + stub_length
-                        stub_end_y = comp_pin_y
-                    elif 'R90' in pin_rotation:
-                        stub_end_x = comp_pin_x
-                        stub_end_y = comp_pin_y + stub_length
-                    elif 'R270' in pin_rotation:
-                        stub_end_x = comp_pin_x
-                        stub_end_y = comp_pin_y - stub_length
+                    pin_x = comp_placement['x'] + comp_pin_info.get('gate_x', 0) + comp_pin_info['x']
+                    pin_y = comp_placement['y'] + comp_pin_info.get('gate_y', 0) + comp_pin_info['y']
+                    pin_x = self._snap_to_grid(pin_x)
+                    pin_y = self._snap_to_grid(pin_y)
+                    stub_len = self.grid_step * 0.5
+                    rot = str(comp_pin_info.get('rotation', '')).upper()
+                    if 'R180' in rot:
+                        sx, sy = pin_x - stub_len, pin_y
+                    elif 'R90' in rot:
+                        sx, sy = pin_x, pin_y + stub_len
+                    elif 'R270' in rot:
+                        sx, sy = pin_x, pin_y - stub_len
                     else:
-                        stub_end_x = comp_pin_x - stub_length
-                        stub_end_y = comp_pin_y
-
+                        sx, sy = pin_x + stub_len, pin_y
+                    sx = self._snap_to_grid(sx)
+                    sy = self._snap_to_grid(sy)
                     ET.SubElement(segment, 'wire',
-                                 x1=str(comp_pin_x), y1=str(comp_pin_y),
-                                 x2=str(stub_end_x), y2=str(stub_end_y),
-                                 width="0.1524", layer="91")
-
-                    ET.SubElement(segment, 'label',
-                                 x=str(stub_end_x), y=str(stub_end_y),
-                                 size="1.778", layer="95")
-                else:
-                    # Power pins in separate gates may lack coordinates;
-                    # still add a pinref-only segment so Eagle connects via net name
-                    segment = ET.SubElement(net, 'segment')
-                    actual_pin = comp_pin_info.get('pin_name', comp_pin_resolved)
-                    ET.SubElement(segment, 'pinref', part=comp_ref, gate=comp_gate, pin=actual_pin)
-                    fallback_x = comp_placement['x']
-                    fallback_y = comp_placement['y']
-                    ET.SubElement(segment, 'wire',
-                                 x1=str(fallback_x), y1=str(fallback_y),
-                                 x2=str(fallback_x + self.grid_step), y2=str(fallback_y),
+                                 x1=str(pin_x), y1=str(pin_y),
+                                 x2=str(sx), y2=str(sy),
                                  width="0.1524", layer="91")
 
                 self._record_connected_pin(pin_dict['index'], pin_dict['comp_side'], comp_ref,
@@ -4840,10 +4964,50 @@ class EagleSchematicWriter:
                              x=str(stub_end_x), y=str(supply_pin_y),
                              size="1.778", layer="95")
 
+        # PRE-PASS: Identify cross-reference conflicts. When A.PinX→B.PinY but B.PinZ→A.PinX (Y≠Z),
+        # both connections exist and union-find merges everything into one net (e.g. J7.Pin1 VCC12
+        # merges with U6 LED pins). Skip the connection from the SOURCE (A) that has the wrong target
+        # pin; trust the TARGET (B) section which is authoritative for B's pinout.
+        skip_conflict: Set[Tuple[str, str, str, str]] = set()
+        forward: Dict[Tuple[str, str], Dict[str, Set[str]]] = {}
+        for conn in connections:
+            if conn.get('intermediate'):
+                continue
+            f_ref = conn['from']['ref']
+            t_ref = conn['to']['ref']
+            if self._is_supply_ref(f_ref) or self._is_supply_ref(t_ref):
+                continue
+            if f_ref == t_ref:
+                continue
+            f_pin = conn['from']['pin']
+            t_pin = conn['to']['pin']
+            forward.setdefault((f_ref, t_ref), {}).setdefault(f_pin, set()).add(t_pin)
+        for (b_ref, a_ref), b_pins in list(forward.items()):
+            a_to_b = forward.get((a_ref, b_ref))
+            if not a_to_b:
+                continue
+            for b_pin_z, a_pin_set in b_pins.items():
+                for a_pin_w in a_pin_set:
+                    fwd_b_pins = a_to_b.get(a_pin_w)
+                    if not fwd_b_pins or b_pin_z in fwd_b_pins:
+                        continue
+                    # Conflict: B says B.PinZ->A.PinW, A says A.PinW->B.Pin(wrong_y) with Z!=wrong_y.
+                    # Trust the connector (J*) over the IC - connectors define physical pinout.
+                    wrong_y = next(iter(fwd_b_pins))
+                    if (a_ref or '').startswith('J'):
+                        skip_conflict.add((b_ref, b_pin_z, a_ref, a_pin_w))
+                    elif (b_ref or '').startswith('J'):
+                        skip_conflict.add((a_ref, a_pin_w, b_ref, wrong_y))
+                    else:
+                        skip_conflict.add((a_ref, a_pin_w, b_ref, wrong_y))
+        if skip_conflict:
+            self.debug_messages.append(f"  Cross-ref conflict: skipping {len(skip_conflict)} connection(s) to avoid bus merge")
+
         # PHASE 3: Handle regular component-to-component connections
         skipped_supply = 0
         skipped_placement = 0
         skipped_resolve = 0
+        skipped_conflict = 0
         processed_regular = 0
         for index, connection in enumerate(connections):
             from_entry = connection['from']
@@ -4858,6 +5022,12 @@ class EagleSchematicWriter:
             # Skip supply connections (already handled)
             if from_is_supply or to_is_supply:
                 skipped_supply += 1
+                continue
+
+            # Skip cross-reference conflicting connections (source says wrong target pin)
+            if (from_ref, from_pin, to_ref, to_pin) in skip_conflict:
+                skipped_conflict += 1
+                self.debug_messages.append(f"  Skip conflict: {from_ref}.Pin{from_pin} → {to_ref}.Pin{to_pin}")
                 continue
 
             if from_ref not in self.component_placements or to_ref not in self.component_placements:
@@ -4896,8 +5066,8 @@ class EagleSchematicWriter:
             from_pin_resolved, from_pin_info = self._resolve_pin(from_ref, from_pins, from_pin, connection['from'].get('label'))
             to_pin_resolved, to_pin_info = self._resolve_pin(to_ref, to_pins, to_pin, connection['to'].get('label'))
 
-            # Debug: log resolution for U6/J7 connections
-            if from_ref in ('U6', 'J7') or to_ref in ('U6', 'J7'):
+            # Debug: log resolution for U5, U6, J7 connections
+            if from_ref in ('U5', 'U6', 'J7') or to_ref in ('U5', 'U6', 'J7'):
                 self.debug_messages.append(
                     f"  PIN RESOLVE: {from_ref}.Pin{from_pin}(label={connection['from'].get('label')}) → '{from_pin_resolved}' | "
                     f"{to_ref}.Pin{to_pin}(label={connection['to'].get('label')}) → '{to_pin_resolved}'"
@@ -4911,6 +5081,13 @@ class EagleSchematicWriter:
                     u6_placement = self.component_placements.get('U6', {})
                     u6_pins = u6_placement.get('pins', {})
                     self.debug_messages.append(f"  U6 PIN MAP ({len(u6_pins)} pins): {sorted(u6_pins.keys())}")
+                if not hasattr(self, '_u5_pins_dumped') and (from_ref == 'U5' or to_ref == 'U5'):
+                    self._u5_pins_dumped = True
+                    u5_placement = self.component_placements.get('U5', {})
+                    u5_pins = u5_placement.get('pins', {})
+                    u5_keys = sorted(u5_pins.keys())
+                    u5_sample = [(k, u5_pins[k].get('pad'), u5_pins[k].get('pin_name')) for k in u5_keys[:5]]
+                    self.debug_messages.append(f"  U5 PIN MAP ({len(u5_pins)} pins): keys={u5_keys[:8]}... sample={u5_sample}")
 
             if not (from_pin_resolved and from_pin_info and to_pin_resolved and to_pin_info):
                 if not from_pin_resolved or not from_pin_info:
@@ -4944,16 +5121,23 @@ class EagleSchematicWriter:
                     to_pins))
                 continue
 
-            from_pin_x = self._snap_to_grid(from_comp['x'] + from_pin_info.get('gate_x', 0) + from_pin_info['x'])
-            from_pin_y = self._snap_to_grid(from_comp['y'] + from_pin_info.get('gate_y', 0) + from_pin_info['y'])
-            to_pin_x = self._snap_to_grid(to_comp['x'] + to_pin_info.get('gate_x', 0) + to_pin_info['x'])
-            to_pin_y = self._snap_to_grid(to_comp['y'] + to_pin_info.get('gate_y', 0) + to_pin_info['y'])
+            # Use exact pin position for wire connection - Eagle requires wire to touch pin precisely
+            from_pin_x_raw = from_comp['x'] + from_pin_info.get('gate_x', 0) + from_pin_info['x']
+            from_pin_y_raw = from_comp['y'] + from_pin_info.get('gate_y', 0) + from_pin_info['y']
+            to_pin_x_raw = to_comp['x'] + to_pin_info.get('gate_x', 0) + to_pin_info['x']
+            to_pin_y_raw = to_comp['y'] + to_pin_info.get('gate_y', 0) + to_pin_info['y']
+            from_pin_x = self._snap_to_grid(from_pin_x_raw)
+            from_pin_y = self._snap_to_grid(from_pin_y_raw)
+            to_pin_x = self._snap_to_grid(to_pin_x_raw)
+            to_pin_y = self._snap_to_grid(to_pin_y_raw)
 
             from_key = (from_ref, from_pin_resolved)
             to_key = (to_ref, to_pin_resolved)
 
-            ensure_node(from_key, from_ref, from_pin_resolved, from_pin_info, from_pin_x, from_pin_y)
-            ensure_node(to_key, to_ref, to_pin_resolved, to_pin_info, to_pin_x, to_pin_y)
+            ensure_node(from_key, from_ref, from_pin_resolved, from_pin_info,
+                        from_pin_x, from_pin_y, from_pin_x_raw, from_pin_y_raw)
+            ensure_node(to_key, to_ref, to_pin_resolved, to_pin_info,
+                        to_pin_x, to_pin_y, to_pin_x_raw, to_pin_y_raw)
             union(from_key, to_key)
 
             regular_connections.append({
@@ -4978,13 +5162,15 @@ class EagleSchematicWriter:
         self.debug_messages.append(f"Regular connections processed: {processed_regular}")
         self.debug_messages.append(f"Skipped (no placement): {skipped_placement}")
         self.debug_messages.append(f"Skipped (pin resolve fail): {skipped_resolve}")
+        self.debug_messages.append(f"Skipped (cross-ref conflict): {skipped_conflict}")
         self.debug_messages.append(f"=====================================\n")
 
         # STUB-BASED ROUTING: Each pin gets its own segment with a short stub + label.
         # Eagle connects pins sharing the same net name.
         # CRITICAL: Use union-find roots to assign net names so that pins in the
         # same group share a net, but pins in DIFFERENT groups get DIFFERENT nets.
-        processed_nets: Dict[str, ET.Element] = {}
+        # Reuse supply nets from Phase 2 to avoid "redefinition of name" (duplicate <net>)
+        processed_nets: Dict[str, ET.Element] = dict(supply_net_elements)
         group_net_names: Dict[Tuple[str, str], str] = {}  # union-find root → net name
         processed_pins: Set[Tuple[str, str]] = set()
 
@@ -5049,19 +5235,20 @@ class EagleSchematicWriter:
 
                 segment = ET.SubElement(net, 'segment')
 
-                pin_x = node['pin_x']
-                pin_y = node['pin_y']
-                gate = node['pin_info'].get('gate', 'G$1') if isinstance(node['pin_info'], dict) else 'G$1'
+                # Use snapped grid coordinates for pin connection
+                pin_x = self._snap_to_grid(node['pin_x'])
+                pin_y = self._snap_to_grid(node['pin_y'])
+                pin_info = node['pin_info']
+                gate = pin_info.get('gate', 'G$1') if isinstance(pin_info, dict) else 'G$1'
 
-                actual_pin = node['pin_info'].get('pin_name', node['pin']) if isinstance(node['pin_info'], dict) else node['pin']
+                actual_pin = pin_info.get('pin_name', node['pin']) if isinstance(pin_info, dict) else node['pin']
                 ET.SubElement(segment, 'pinref', part=node['ref'], gate=gate, pin=actual_pin)
 
                 stub_length = self.grid_step * 1.0
-                pin_info = node['pin_info']
                 pin_rotation = str(pin_info.get('rotation', '')) if isinstance(pin_info, dict) else ''
 
                 if 'R180' in pin_rotation:
-                    stub_end_x = pin_x + stub_length
+                    stub_end_x = pin_x - stub_length
                     stub_end_y = pin_y
                 elif 'R90' in pin_rotation:
                     stub_end_x = pin_x
@@ -5070,8 +5257,10 @@ class EagleSchematicWriter:
                     stub_end_x = pin_x
                     stub_end_y = pin_y - stub_length
                 else:
-                    stub_end_x = pin_x - stub_length
+                    stub_end_x = pin_x + stub_length
                     stub_end_y = pin_y
+                stub_end_x = self._snap_to_grid(stub_end_x)
+                stub_end_y = self._snap_to_grid(stub_end_y)
 
                 ET.SubElement(segment, 'wire',
                              x1=str(pin_x), y1=str(pin_y),
@@ -5153,6 +5342,46 @@ class EagleSchematicWriter:
                 for key in pin_map:
                     if key.upper() == override_target.upper():
                         return key, pin_map[key]
+                # Multi-gate libs: pin_map keyed by gate, pin_name in value
+                for key, value in pin_map.items():
+                    pn = value.get('pin_name') or value.get('pin')
+                    if pn and (pn == override_target or pn.upper() == override_target.upper()):
+                        return key, value
+                # Override target not in pin_map (e.g. library uses different spelling)
+                if override_target.replace('~', '').upper() in (k.replace('~', '').upper() for k in pin_map):
+                    for key in pin_map:
+                        if key.replace('~', '').upper() == override_target.replace('~', '').upper():
+                            return key, pin_map[key]
+                # Match by pin_name with tilde normalization
+                for key, value in pin_map.items():
+                    pn = (value.get('pin_name') or value.get('pin') or key)
+                    if pn and (pn.replace('~', '').upper() == override_target.replace('~', '').upper()):
+                        return key, value
+                # Fallback: match by pad when requested_pin is numeric
+                if requested_pin and requested_pin.isdigit():
+                    for key, value in pin_map.items():
+                        pad = str(value.get('pad') or '').strip()
+                        for pt in pad.split():
+                            if pt == requested_pin or pt == f"P${requested_pin}":
+                                return key, value
+
+        # ICs: match by pad number first — Pin 1 = pad 1, no label gymnastics needed
+        if ref.startswith(('U', 'Q')) and requested_pin and requested_pin.isdigit():
+            req_norm = requested_pin.lstrip('0') or '0'
+            for key, value in pin_map.items():
+                pad = str(value.get('pad') or '').strip()
+                if not pad:
+                    continue
+                pad_tokens = pad.split()
+                for pt in pad_tokens:
+                    if pt == requested_pin:
+                        return key, value
+                    if pt.isdigit() and (pt.lstrip('0') or '0') == req_norm:
+                        return key, value
+                    if pt == f"P${requested_pin}" or pt == f"P${req_norm}":
+                        return key, value
+                if pad == f"P${requested_pin}" or pad == f"P${req_norm}":
+                    return key, value
 
         # Connectors: direct number-to-number matching
         if ref.startswith('J'):
@@ -5183,6 +5412,45 @@ class EagleSchematicWriter:
             for k in pin_map:
                 if k.replace('~', '').upper() == label_no_tilde:
                     return k, pin_map[k]
+            for k, v in pin_map.items():
+                pn = (v.get('pin_name') or v.get('pin') or k)
+                if pn and pn.replace('~', '').upper() == label_no_tilde:
+                    return k, pin_map[k]
+            # 74HC123 etc: 2CLR = 2~RD, 1CLR = 1~RD (library may use ~RD; pad numbers can be wrong)
+            label_upper = label_clean.upper().replace('~', '')
+            if label_upper in ('2CLR', '2RD'):
+                for k in pin_map:
+                    if k.replace('~', '').upper() in ('2CLR', '2RD'):
+                        return k, pin_map[k]
+                for k, v in pin_map.items():
+                    pn = (v.get('pin_name') or v.get('pin') or k)
+                    if pn and pn.replace('~', '').upper() in ('2CLR', '2RD'):
+                        return k, pin_map[k]
+            if label_upper in ('1CLR', '1RD'):
+                for k in pin_map:
+                    if k.replace('~', '').upper() in ('1CLR', '1RD'):
+                        return k, pin_map[k]
+                for k, v in pin_map.items():
+                    pn = (v.get('pin_name') or v.get('pin') or k)
+                    if pn and pn.replace('~', '').upper() in ('1CLR', '1RD'):
+                        return k, pin_map[k]
+            # 74HC123 etc: 1A = 1~A, 2A = 2~A (library uses overbar notation)
+            if label_upper in ('1A',):
+                for k in pin_map:
+                    if k.replace('~', '').upper() == '1A':
+                        return k, pin_map[k]
+                for k, v in pin_map.items():
+                    pn = (v.get('pin_name') or v.get('pin') or k)
+                    if pn and pn.replace('~', '').upper() == '1A':
+                        return k, pin_map[k]
+            if label_upper in ('2A',):
+                for k in pin_map:
+                    if k.replace('~', '').upper() == '2A':
+                        return k, pin_map[k]
+                for k, v in pin_map.items():
+                    pn = (v.get('pin_name') or v.get('pin') or k)
+                    if pn and pn.replace('~', '').upper() == '2A':
+                        return k, pin_map[k]
 
         if ref.startswith(('D', 'LED')) and requested_pin in ('1', '2'):
             if requested_pin == '1' and 'A' in pin_map:
@@ -5192,17 +5460,6 @@ class EagleSchematicWriter:
                     return 'C', pin_map['C']
                 if 'K' in pin_map:
                     return 'K', pin_map['K']
-
-        # ICs/transistors: match MD pin number to Eagle pad (physical pin) first
-        if ref.startswith(('U', 'Q')) and requested_pin and requested_pin.isdigit():
-            for key, value in pin_map.items():
-                pad = str(value.get('pad') or '').strip()
-                if not pad:
-                    continue
-                pad_tokens = pad.split()
-                for pt in pad_tokens:
-                    if pt == requested_pin or (pt.isdigit() and (pt.lstrip('0') or '0') == (requested_pin.lstrip('0') or '0')):
-                        return key, value
 
         candidates: List[str] = []
         if requested_pin:
@@ -6608,16 +6865,25 @@ class EagleSchematicGeneratorGUI:
                         if not lib_options:
                             self._log(f"⚠️ No pin metadata found for {ref} using {lib_name}/{deviceset_name} (variant '{device_name or 'default'}')")
                         else:
-                            options.extend(lib_options)
+                            # Only add lib pins not already in options (avoids "1A" when we have "1A (Pin 1)")
+                            existing_names = {o.split(" (")[0].strip() for o in options if " (" in o}
+                            for lp in lib_options:
+                                if lp not in existing_names and lp not in options:
+                                    options.append(lp)
                 if options:
                     seen_options = []
                     for opt in options:
                         if opt not in seen_options:
                             seen_options.append(opt)
                     options = seen_options
-                var = tk.StringVar(value=self._get_existing_override(ref, issue))
+                existing = self._get_existing_override(ref, issue)
+                # Prefer display form "1A (Pin 1)" when available, so user sees both name and number
+                if existing and options:
+                    match = next((o for o in options if o == existing or o.startswith(existing + " (")), existing)
+                    existing = match
+                var = tk.StringVar(value=existing)
                 state = 'readonly' if options else 'normal'
-                combo = ttk.Combobox(row, values=options, textvariable=var, state=state, width=28)
+                combo = ttk.Combobox(row, values=options, textvariable=var, state=state, width=36)
                 combo.pack(side=tk.LEFT, padx=5)
                 entry_widgets[ref].append({'var': var, 'issue': issue, 'combo': combo})
         button_frame = ttk.Frame(window)
@@ -6647,13 +6913,15 @@ class EagleSchematicGeneratorGUI:
                     choice = entry['var'].get().strip()
                     if not choice:
                         continue
+                    # Extract actual pin name from "1A (Pin 1)" display format
+                    actual_pin = choice.split(" (")[0].strip() if " (" in choice else choice
                     keys = [k for k in (issue.get('pin'), issue.get('label')) if k]
                     if not keys:
                         continue
                     override_map = self.pin_overrides.setdefault(ref, {})
                     for key in keys:
-                        override_map[key] = choice
-                        mappings_added.append((ref, key, choice))
+                        override_map[key] = actual_pin
+                        mappings_added.append((ref, key, actual_pin))
             if mappings_added:
                 self._log(f"Recorded {len(mappings_added)} pin override entry(ies)")
                 for ref, key, choice in mappings_added:

@@ -108,6 +108,8 @@ Click **"3. Generate SCH"** to produce the Eagle schematic. The script will:
 - Build the schematic XML structure
 - Output a `.sch` file and optionally a `.scr` script
 
+If some library pin names differ from your Markdown (e.g. `1~A` vs `1A`), a **Resolve Pin Mapping Issues** dialog may appear. Choose the correct library pin for each MD pin (the list shows both name and number, e.g. `1A (Pin 1)`), then **Save & Close** or **Save & Re-run**. Mappings are stored in `<your_md_stem>_pin_overrides.json` for future runs.
+
 Open the `.sch` file in Eagle or Fusion 360 Electronic Design to refine placement, run ERC/DRC, and proceed to layout.
 
 ![Generate SCH](images/gen.jpg)
@@ -163,11 +165,12 @@ The file `AI_MD_SCHEMATIC_PROMPT.md` contains instructions for prompting an AI m
 ## File Structure
 
 
-| File                           | Purpose                                   |
-| ------------------------------ | ----------------------------------------- |
-| `eagle_schematic_generator.py` | Main script (GUI and logic)               |
-| `AI_MD_SCHEMATIC_PROMPT.md`    | Prompt template for AI-generated Markdown |
-| `eagle_library_cache.json`     | Cached library index (auto-generated)     |
+| File                           | Purpose                                                       |
+| ------------------------------ | ------------------------------------------------------------- |
+| `eagle_schematic_generator.py` | Main script (GUI and logic)                                   |
+| `AI_MD_SCHEMATIC_PROMPT.md`    | Prompt template for AI-generated Markdown                     |
+| `eagle_library_cache.json`     | Cached library index (auto-generated)                         |
+| `<name>_pin_overrides.json`    | Optional per-MD pin mappings (e.g. `coil_pin_overrides.json`)  |
 
 
 
@@ -175,7 +178,11 @@ The file `AI_MD_SCHEMATIC_PROMPT.md` contains instructions for prompting an AI m
 
 ## Version
 
-Current version: **1.4.10** (see `__version__` in the script).
+Current version: **1.4.12** (see `__version__` in the script).
+
+**v1.4.12**: Pin resolution and library handling improvements. Resolve IC pins by **pad number first** (e.g. MD Pin 10 → library pad 10) so number-to-number mapping works without overrides. When Markdown and library disagree on a connection (e.g. J7/U6 off-by-one), **trust the connector (J\*)** and skip the conflicting IC connection to avoid bus merges. **Pin mapping dialog** now shows both pin name and number (e.g. `1A (Pin 1)`); saved overrides store the pin name. **Library parsing** uses only the first technology’s connects per device so pad numbers stay consistent for multi-tech parts (e.g. 74HC08 DIP vs SOIC). U5 74HC123: overrides fallback by pad and `pin_name`; 1A/2A/1Q label aliases; `P$N` pad format supported. Optional `AI_MD_SCHEMATIC_PROMPT.md` and `coil_pin_overrides.json` updates.
+
+**v1.4.11**: Fix supply pin fallback placement—pins without coordinates no longer all use the component center (which caused VCC5 labels to stack on ADJ_Q); each pin now gets a staggered offset.
 
 **v1.4.10**: Fix supply net assignment so VCC5/VCC12/GND get proper names instead of N$1; add supply net isolation validation (warns when a pin appears on multiple supply nets).
 
