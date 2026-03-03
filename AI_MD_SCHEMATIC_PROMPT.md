@@ -95,7 +95,8 @@ This instruction set must work with any AI model and any electronics design. Exp
    - Every time you mention a named signal, reuse the same `Net <NAME>` spelling everywhere (component pins, ASCII diagrams, and summary tables) so the parser can unify those nodes automatically.
    - When a connection is described outside of a component-specific block, write it as `<RefA>.PinX ─── <RefB>.PinY` on a single line.
    - Describe every electrical connection explicitly at least once—no implied links, no "same as above" wording—so the parser sees 100% of the nets.
-   - Do NOT mirror the same net in both component sections; pick the most logical source and reference the destination from there.
+   - Each connection should have exactly one "owner" line in one component section. Reverse mention in the peer component is optional; if provided, it MUST match pin-for-pin and net-for-net.
+   - Each pin line should include exactly one explicit `OtherRef.PinN` target token to avoid ambiguous chained prose.
    - **CRITICAL — exhaustive pin listing**: If a component (e.g., an LM3914 display driver or an LED bar connector) has many output pins that each wire to a different target, list EVERY pin on its own line with the explicit `CompRef.PinN` target. Do NOT summarize groups of pins or skip "obvious" connections. Example for an 18-pin IC with 10 LED outputs:
      ```
      Pin 1 (LED1): J7.Pin2
@@ -121,6 +122,7 @@ This instruction set must work with any AI model and any electronics design. Exp
 
 6. Nets and power rails
    - Document **every** named net in its own summary line using the exact string `Net <NAME>: <Ref.Pin list>` toward the end of the file. Include every participant once so the parser has an authoritative roster.
+   - Use a strict supply-net whitelist for power rails (for example: `VCC5`, `VCC12`, `VCC3V3`, `GND`, `VDD`, `VSS`, `+12V`, `+05V`). A supply-connected pin may appear on one and only one whitelisted supply net.
    - **CRITICAL — NEVER combine supply nets of different names**: Supply nets (VCC5, VCC12, VCC3V3, GND, VDD, VSS, etc.) are **distinct electrical nodes**. A single pin MUST appear on **exactly one** supply net. If J8.Pin1 is +5V (per the connector datasheet), it goes on `Net VCC5` ONLY — never also on `Net VCC12` or any other supply. **Common mistake**: A power connector (e.g., J2) that lists all devices on VCC12 may incorrectly include J8.Pin1; but J8 is a remote pot connector whose Pin 1 is +5V (VCC5), not +12V. Check each connector's datasheet: J8.Pin1 = VCC5, so it must NOT appear in the J2.Pin1 (VCC12) chain or in `Net VCC12`. Listing the same pin in multiple supply nets will short supplies and destroy the design. **Every connector pin, IC power pin, and passive tied to a rail must appear in exactly one supply net.**
    - **For ICs and connectors**: In the Net summary, optionally add the datasheet pin name in parentheses after the pin number to improve automatic pin mapping. Example: `Net COIL1_TRIG: U4.Pin3 (1Y), J3.Pin3 (C_TRIGGER)`. This helps the generator match MD pins to Eagle library logical names (1A, 1Y, VCC, etc.).
    - Within the body, feel free to add human-friendly notes, but always prefix the connection clause with `Net <NAME>` so readers can map prose→net.
@@ -144,7 +146,9 @@ This instruction set must work with any AI model and any electronics design. Exp
 8. Output expectations
    - Return a single cohesive Markdown document, not separate answers per section.
    - Do not include pseudo-code or TODOs; everything must be final.
-   - Use only ASCII text except for the `─` character that the parser requires.
+   - Start output immediately with `# <Project Name>`. Do not add any introductory commentary before that heading.
+   - Do NOT wrap the entire schematic in a single fenced code block. Use normal Markdown sections and only use small fenced code blocks inside component sections.
+   - Use only ASCII text except for the required symbols `─`, `Ω`, and `µ`.
 
 <PROJECT_SPEC>
 ````

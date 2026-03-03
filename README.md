@@ -178,7 +178,11 @@ The file `AI_MD_SCHEMATIC_PROMPT.md` contains instructions for prompting an AI m
 
 ## Version
 
-Current version: **1.4.12** (see `__version__` in the script).
+Current version: **1.4.14** (see `__version__` in the script).
+
+**v1.4.14**: Prompt and coil.md fixes for first-try generation. Updated `AI_MD_SCHEMATIC_PROMPT.md` with connection-ownership rule, supply-net whitelist, output guardrails (no wrapper code block, start with `# Project`), and allowed symbols `─`, `Ω`, `µ`. Corrected `coil.md` cross-references and supply nets (J8.Pin1 VCC5-only, U6↔J7 LED pin mapping, U5 TRIG/ADJ_Q pins); parser and SCH generation now run with zero warnings.
+
+**v1.4.13**: Prefer pin-populated manual mapping entries in `find_component()`; auto-load sidecar `*_mappings.json` on parse and before SCH/SCR generation; wire anchors use pin-origin coordinates for reliable Eagle pin connection.
 
 **v1.4.12**: Pin resolution and library handling improvements. Resolve IC pins by **pad number first** (e.g. MD Pin 10 → library pad 10) so number-to-number mapping works without overrides. When Markdown and library disagree on a connection (e.g. J7/U6 off-by-one), **trust the connector (J\*)** and skip the conflicting IC connection to avoid bus merges. **Pin mapping dialog** now shows both pin name and number (e.g. `1A (Pin 1)`); saved overrides store the pin name. **Library parsing** uses only the first technology’s connects per device so pad numbers stay consistent for multi-tech parts (e.g. 74HC08 DIP vs SOIC). U5 74HC123: overrides fallback by pad and `pin_name`; 1A/2A/1Q label aliases; `P$N` pad format supported. Optional `AI_MD_SCHEMATIC_PROMPT.md` and `coil_pin_overrides.json` updates.
 
