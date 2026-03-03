@@ -178,7 +178,9 @@ The file `AI_MD_SCHEMATIC_PROMPT.md` contains instructions for prompting an AI m
 
 ## Version
 
-Current version: **1.4.14** (see `__version__` in the script).
+Current version: **1.4.15** (see `__version__` in the script).
+
+**v1.4.15**: Parser now rejects 2-pin passive shorts (both pins on same net); prompts explicit `PASSIVE SHORT` error with component ref and value. Wire stubs use Eagle pin-tip coordinates via `_absolute_pin_connection_point` for passives and ICs. AI prompt updated with 2-pin passive separation rule and mandatory passive-short self-check.
 
 **v1.4.14**: Prompt and coil.md fixes for first-try generation. Updated `AI_MD_SCHEMATIC_PROMPT.md` with connection-ownership rule, supply-net whitelist, output guardrails (no wrapper code block, start with `# Project`), and allowed symbols `─`, `Ω`, `µ`. Corrected `coil.md` cross-references and supply nets (J8.Pin1 VCC5-only, U6↔J7 LED pin mapping, U5 TRIG/ADJ_Q pins); parser and SCH generation now run with zero warnings.
 

@@ -96,6 +96,7 @@ This instruction set must work with any AI model and any electronics design. Exp
    - When a connection is described outside of a component-specific block, write it as `<RefA>.PinX ─── <RefB>.PinY` on a single line.
    - Describe every electrical connection explicitly at least once—no implied links, no "same as above" wording—so the parser sees 100% of the nets.
    - Each connection should have exactly one "owner" line in one component section. Reverse mention in the peer component is optional; if provided, it MUST match pin-for-pin and net-for-net.
+   - **CRITICAL — 2-pin passive separation**: For standard 2-pin passives (`R*`, `C*`, `L*`) that are not explicitly `0R`, `JUMPER`, or `LINK`, `Pin 1` and `Pin 2` MUST end up on different nets. Never assign the same target token (for example, `J8.Pin2`) to both pins of the same passive, directly or via contradictory reverse references. A single accidental duplicate collapses both pins into one electrical net and shorts around the component.
    - Each pin line should include exactly one explicit `OtherRef.PinN` target token to avoid ambiguous chained prose.
    - **CRITICAL — exhaustive pin listing**: If a component (e.g., an LM3914 display driver or an LED bar connector) has many output pins that each wire to a different target, list EVERY pin on its own line with the explicit `CompRef.PinN` target. Do NOT summarize groups of pins or skip "obvious" connections. Example for an 18-pin IC with 10 LED outputs:
      ```
@@ -142,6 +143,7 @@ This instruction set must work with any AI model and any electronics design. Exp
      1. **Per-pin check**: For every component pin that connects to a supply (VCC5, VCC12, GND, VDD, etc.), verify it appears in **exactly one** supply net. If a connector has Pin 1 = +5V, it must be in VCC5 only — never in VCC12, VCC3V3, or any other supply net.
      2. **Net summary check**: Scan each `Net <SupplyName>:` line. For each Ref.Pin in that list, confirm it is NOT also listed in any other supply net. If J8.Pin1 appears in `Net VCC5`, it must NOT appear in `Net VCC12` or `Net GND`.
      3. **Cross-reference check**: When a component section (e.g., J2) lists other components on its net (e.g., `Net VCC12 ─── J8.Pin1`), verify that the target component's own section (J8) says that pin is on the SAME net. If J2 says J8.Pin1 is on VCC12 but J8 says Pin 1 is +5V on VCC5, that is a **fatal error** — you have shorted 5V to 12V. Fix it before responding.
+   - **CRITICAL — passive-short self-check (MANDATORY)**: Build a quick mental table for every 2-pin passive (`R*`, `C*`, `L*`) as `Ref | Pin1 net | Pin2 net`. If any non-jumper part has identical `Pin1 net == Pin2 net`, STOP and correct the pin references before returning the document.
 
 8. Output expectations
    - Return a single cohesive Markdown document, not separate answers per section.

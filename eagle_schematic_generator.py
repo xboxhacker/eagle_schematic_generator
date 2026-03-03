@@ -4,7 +4,7 @@ Eagle CAD Schematic Generator from AI MD Files
 Converts markdown schematic files to Eagle CAD .SCR scripts and .SCH files
 """
 
-__version__ = "1.4.14"
+__version__ = "1.4.15"
 
 import os
 import re
@@ -1672,6 +1672,7 @@ class MDSchematicParser:
             self._parse_nets(content)
             self._parse_connections(content)
             self.warnings = self._validate_cross_references() + self.warnings
+            self._validate_two_pin_passive_separation()
 
             self.data = {
                 'components': self.components,
@@ -1686,6 +1687,85 @@ class MDSchematicParser:
             raise Exception(f"Regex error in parsing: {e}. Please check MD file format.")
         except Exception as e:
             raise Exception(f"Error parsing MD file: {str(e)}")
+
+    def _is_intentional_short_passive(self, ref: str, value: str) -> bool:
+        """Allow explicit 0R/jumper links to have both pins on one net."""
+        ref_upper = (ref or '').upper()
+        if ref_upper.startswith('JMP'):
+            return True
+        value_upper = (value or '').upper().replace(' ', '')
+        if not value_upper:
+            return False
+        zero_tokens = (
+            '0R', '0OHM', '0Ω', '0_OHM', '0-OHM', 'ZEROOHM', 'JUMPER', 'LINK'
+        )
+        return any(token in value_upper for token in zero_tokens)
+
+    def _validate_two_pin_passive_separation(self) -> None:
+        """Catch accidental shorts where both pins of a 2-pin passive collapse to one net."""
+        if not self.connections:
+            return
+
+        component_values = {
+            c.get('reference', ''): c.get('value', '')
+            for c in self.components
+            if c.get('reference')
+        }
+
+        # Track pin usage by component and union all connected pins.
+        pin_usage: Dict[str, Set[str]] = {}
+        parent: Dict[Tuple[str, str], Tuple[str, str]] = {}
+
+        def find(key: Tuple[str, str]) -> Tuple[str, str]:
+            parent.setdefault(key, key)
+            if parent[key] != key:
+                parent[key] = find(parent[key])
+            return parent[key]
+
+        def union(a: Tuple[str, str], b: Tuple[str, str]) -> None:
+            ra = find(a)
+            rb = find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        for conn in self.connections:
+            # Skip parser-generated intermediate links; authoritative links are enough.
+            if conn.get('intermediate'):
+                continue
+            f = conn.get('from') or {}
+            t = conn.get('to') or {}
+            f_ref, f_pin = f.get('ref'), f.get('pin')
+            t_ref, t_pin = t.get('ref'), t.get('pin')
+            if not (f_ref and f_pin and t_ref and t_pin):
+                continue
+            pin_usage.setdefault(f_ref, set()).add(str(f_pin))
+            pin_usage.setdefault(t_ref, set()).add(str(t_pin))
+            union((f_ref, str(f_pin)), (t_ref, str(t_pin)))
+
+        errors: List[str] = []
+        soft_warnings: List[str] = []
+        for ref, used_pins in pin_usage.items():
+            # Restrict to standard 2-pin passives by reference prefix.
+            if not ref.startswith(('R', 'C', 'L')):
+                continue
+            if not {'1', '2'}.issubset(used_pins):
+                continue
+
+            if find((ref, '1')) == find((ref, '2')):
+                value = component_values.get(ref, '')
+                message = (
+                    f"PASSIVE SHORT: {ref}.Pin1 and {ref}.Pin2 resolve to the same net/group. "
+                    f"This usually means a mistaken cross-reference in MD (for example, a shared target pin)."
+                )
+                if self._is_intentional_short_passive(ref, value):
+                    soft_warnings.append(f"{message} Allowed because value '{value}' implies an intentional link.")
+                else:
+                    errors.append(f"{message} Value='{value or '?'}'.")
+
+        if soft_warnings:
+            self.warnings.extend(soft_warnings)
+        if errors:
+            raise Exception("Two-pin passive separation violated:\n  " + "\n  ".join(errors))
 
     def _validate_cross_references(self) -> List[str]:
         """Detect pin-number disagreements between component sections.
@@ -3725,17 +3805,23 @@ class EagleSchematicWriter:
         return length_map.get((length_attr or 'long').lower(), 7.62)
 
     def _get_pin_connection_point(self, pin_x: float, pin_y: float, pin_info: Dict) -> Tuple[float, float]:
-        """Eagle connection point is at the pin tip. R0=right, R90=above, R180=left, R270=below."""
+        """Return Eagle pin tip from symbol pin origin + length + rotation."""
         length_attr = pin_info.get('length', 'long')
         length_mm = self._pin_length_mm(length_attr)
         rotation = str(pin_info.get('rotation') or pin_info.get('rot', '')).upper()
         if 'R180' in rotation:
-            return (pin_x - length_mm, pin_y)
+            return (pin_x + length_mm, pin_y)
         if 'R90' in rotation:
-            return (pin_x, pin_y + length_mm)
-        if 'R270' in rotation:
             return (pin_x, pin_y - length_mm)
-        return (pin_x + length_mm, pin_y)
+        if 'R270' in rotation:
+            return (pin_x, pin_y + length_mm)
+        return (pin_x - length_mm, pin_y)
+
+    def _absolute_pin_connection_point(self, placement: Dict, pin_info: Dict) -> Tuple[float, float]:
+        """Compute absolute sheet coordinates for a resolved pin's connection tip."""
+        pin_origin_x = placement['x'] + pin_info.get('gate_x', 0) + pin_info['x']
+        pin_origin_y = placement['y'] + pin_info.get('gate_y', 0) + pin_info['y']
+        return self._get_pin_connection_point(pin_origin_x, pin_origin_y, pin_info)
 
     def _snap_to_grid(self, value: float) -> float:
         """Snap a coordinate to the configured grid spacing."""
@@ -5030,8 +5116,7 @@ class EagleSchematicWriter:
                 # Wire stub from the Eagle pin connection point outward.
                 # In Eagle symbol XML, pin x/y is already the connection point.
                 if has_coords:
-                    pin_x = comp_placement['x'] + comp_pin_info.get('gate_x', 0) + comp_pin_info['x']
-                    pin_y = comp_placement['y'] + comp_pin_info.get('gate_y', 0) + comp_pin_info['y']
+                    pin_x, pin_y = self._absolute_pin_connection_point(comp_placement, comp_pin_info)
                     stub_len = self.grid_step * 2
                     rot = str(comp_pin_info.get('rotation') or comp_pin_info.get('rot', '')).upper()
                     # Extend away from symbol body (opposite the pin's internal direction).
@@ -5242,11 +5327,9 @@ class EagleSchematicWriter:
                     to_pins))
                 continue
 
-            # Use exact pin position for wire connection - Eagle requires wire to touch pin precisely
-            from_pin_x_raw = from_comp['x'] + from_pin_info.get('gate_x', 0) + from_pin_info['x']
-            from_pin_y_raw = from_comp['y'] + from_pin_info.get('gate_y', 0) + from_pin_info['y']
-            to_pin_x_raw = to_comp['x'] + to_pin_info.get('gate_x', 0) + to_pin_info['x']
-            to_pin_y_raw = to_comp['y'] + to_pin_info.get('gate_y', 0) + to_pin_info['y']
+            # Use exact Eagle pin tip position for wire connection.
+            from_pin_x_raw, from_pin_y_raw = self._absolute_pin_connection_point(from_comp, from_pin_info)
+            to_pin_x_raw, to_pin_y_raw = self._absolute_pin_connection_point(to_comp, to_pin_info)
             from_pin_x = self._snap_to_grid(from_pin_x_raw)
             from_pin_y = self._snap_to_grid(from_pin_y_raw)
             to_pin_x = self._snap_to_grid(to_pin_x_raw)
