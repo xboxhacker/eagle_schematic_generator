@@ -4,7 +4,7 @@ Eagle CAD Schematic Generator from AI MD Files
 Converts markdown schematic files to Eagle CAD .SCR scripts and .SCH files
 """
 
-__version__ = "1.4.15"
+__version__ = "1.4.17"
 
 import os
 import re
@@ -692,11 +692,11 @@ class EagleLibraryParser:
             if lbr_file:
                 try:
                     self._parse_library_deep(lbr_file)
-                    print(f"✓ Deep scanned {lib_name} from {lbr_file}")
+                    print(f"Deep scanned {lib_name} from {lbr_file}")
                 except Exception as e:
                     print(f"Error deep scanning {lbr_file.name}: {e}")
             else:
-                print(f"✗ Could not find library file for {lib_name} in {self.eagle_dir}")
+                print(f"Could not find library file for {lib_name} in {self.eagle_dir}")
 
         return len(used_libraries)
 
@@ -2020,7 +2020,8 @@ class MDSchematicParser:
     def _parse_nets(self, content: str):
         """Parse net definitions from markdown."""
         try:
-            net_pattern = r'(?:Net|Signal)\s+([A-Z_][A-Z0-9_]*)\b'
+            # Allow common rail names that start with digits/signs: 5V, +12V, -5V, 3V3, etc.
+            net_pattern = r'(?:Net|Signal)\s+([+\-]?[A-Z0-9_][A-Z0-9_+\-]*)(?=\s|$|[:.,;])'
             matches = re.findall(net_pattern, content, re.IGNORECASE)
             for net_name in matches:
                 self._add_net_name(net_name)
@@ -2052,7 +2053,10 @@ class MDSchematicParser:
 
     def _parse_net_memberships(self, content: str):
         """Capture pin membership from 'Net NAME:' summary lines."""
-        line_pattern = re.compile(r'^(?:Net|Signal)\s+([A-Z_][A-Z0-9_]*)\s*(?:\([^)]+\))?\s*:\s*(.+)$', re.IGNORECASE)
+        line_pattern = re.compile(
+            r'^(?:Net|Signal)\s+([+\-]?[A-Z0-9_][A-Z0-9_+\-]*)\s*(?:\([^)]+\))?\s*:\s*(.+)$',
+            re.IGNORECASE
+        )
         # Optional (label) after pin number, e.g. U4.Pin3 (1Y) or U4.Pin3
         pin_pattern = re.compile(r'([A-Z]+\d+)\.Pin\s*(\d+)(?:\s*\(([^)]+)\))?', re.IGNORECASE)
         pad_pattern = re.compile(r'([A-Z]+\d+)\.(?:PAD)', re.IGNORECASE)
@@ -2184,6 +2188,8 @@ class MDSchematicParser:
 
     def _parse_connections(self, content: str):
         """Parse inter-component connections."""
+        net_token_pattern = r'(?:Net|Signal)\s+([+\-]?[A-Z0-9_][A-Z0-9_+\-]*)'
+
         pattern1 = r'Pin\s+(\d+)(?:\s*\(([^)]+)\))?:.*?(?:to|from)\s+([A-Z]+\d+)\.Pin\s*(\d+)(?:\s*\(([^)]+)\))?'
         pattern2 = r'([A-Z]+\d+)\.Pin\s*(\d+)(?:\s*\(([^)]+)\))?\s*[──]+\s*([A-Z]+\d+)\.Pin\s*(\d+)(?:\s*\(([^)]+)\))?'
         pattern3 = r'Pin\s+(\d+):\s+(\w+)\s*[──]+\s*([A-Z]+\d+)\.Pin\s*(\d+)(?:\s*\(([^)]+)\))?'
@@ -2219,7 +2225,7 @@ class MDSchematicParser:
 
                 line_net = None
                 if current_component and pin_identifier:
-                    net_refs = re.findall(r'(?:Net|Signal)\s+([A-Z_][A-Z0-9_]*)', line, re.IGNORECASE)
+                    net_refs = re.findall(net_token_pattern, line, re.IGNORECASE)
                     for net_name in net_refs:
                         self._register_net_node(net_name, current_component, pin_identifier, pin_label)
                     if net_refs:
@@ -2237,7 +2243,7 @@ class MDSchematicParser:
 
                 if current_component:
                     if not line_net:
-                        line_nets = re.findall(r'(?:Net|Signal)\s+([A-Z_][A-Z0-9_]*)', line, re.IGNORECASE)
+                        line_nets = re.findall(net_token_pattern, line, re.IGNORECASE)
                         line_net = line_nets[0] if line_nets else None
                     matches = re.findall(pattern3, line)
                     for pin1, label1, comp2, pin2, label2 in matches:
@@ -2270,7 +2276,7 @@ class MDSchematicParser:
                 # Catch-all: any CompRef.PinN on a line with current_component and pin_identifier
                 # Handles direct references like "Pin 1 (LED1): J7.Pin2" with no separator
                 if current_component and pin_identifier:
-                    line_nets = re.findall(r'(?:Net|Signal)\s+([A-Z_][A-Z0-9_]*)', line, re.IGNORECASE)
+                    line_nets = re.findall(net_token_pattern, line, re.IGNORECASE)
                     catch_net = line_nets[0] if line_nets else None
                     all_refs = re.findall(r'([A-Z]+\d+)\.Pin\s*(\d+)(?:\s*\(([^)]+)\))?', line, re.IGNORECASE)
                     for comp2, pin2, label2 in all_refs:
@@ -3805,17 +3811,13 @@ class EagleSchematicWriter:
         return length_map.get((length_attr or 'long').lower(), 7.62)
 
     def _get_pin_connection_point(self, pin_x: float, pin_y: float, pin_info: Dict) -> Tuple[float, float]:
-        """Return Eagle pin tip from symbol pin origin + length + rotation."""
-        length_attr = pin_info.get('length', 'long')
-        length_mm = self._pin_length_mm(length_attr)
-        rotation = str(pin_info.get('rotation') or pin_info.get('rot', '')).upper()
-        if 'R180' in rotation:
-            return (pin_x + length_mm, pin_y)
-        if 'R90' in rotation:
-            return (pin_x, pin_y - length_mm)
-        if 'R270' in rotation:
-            return (pin_x, pin_y + length_mm)
-        return (pin_x - length_mm, pin_y)
+        """Return Eagle pin connection point from symbol pin coordinates.
+
+        In Eagle symbol XML, pin x/y is already the electrical connection point.
+        Applying length/rotation offsets here over-shoots many symbols and causes
+        visible-but-unconnected wires.
+        """
+        return (pin_x, pin_y)
 
     def _absolute_pin_connection_point(self, placement: Dict, pin_info: Dict) -> Tuple[float, float]:
         """Compute absolute sheet coordinates for a resolved pin's connection tip."""

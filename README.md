@@ -178,7 +178,11 @@ The file `AI_MD_SCHEMATIC_PROMPT.md` contains instructions for prompting an AI m
 
 ## Version
 
-Current version: **1.4.15** (see `__version__` in the script).
+Current version: **1.4.17** (see `__version__` in the script).
+
+**v1.4.17**: Fix widespread misconnections. Net parsing now recognizes names like `5V`, `+12V`, `SIREN+` everywhere (parser was dropping them, causing anonymous nets). Wire anchors use Eagle native pin coordinates (no length offset); previous tip-offset logic moved wires past connection points for many symbols. Deep-scan logging uses ASCII only to avoid Windows console encoding errors.
+
+**v1.4.16**: Version bump.
 
 **v1.4.15**: Parser now rejects 2-pin passive shorts (both pins on same net); prompts explicit `PASSIVE SHORT` error with component ref and value. Wire stubs use Eagle pin-tip coordinates via `_absolute_pin_connection_point` for passives and ICs. AI prompt updated with 2-pin passive separation rule and mandatory passive-short self-check.
 
